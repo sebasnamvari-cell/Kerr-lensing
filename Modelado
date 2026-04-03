@@ -90,3 +90,463 @@ def producto_stack(M_list):
         M = Mi @ M
     return M
 
+def _iterar(q_guess, M_in, M_mid, M_close, kerr_fwd_func, kerr_bwd_func, modo, guardar_historial=False):
+    q = q_guess
+    alfa = 0.05  # <--- FACTOR DE RELAJACIÓN: Evita que el haz "salte" a otra solución
+    max_iter = 1000
+    q_ultimo = q
+    historial = []
+
+    for i in range(max_iter):
+        if not q_valido(q): break
+        
+        # Propagación según el modo (tu lógica actual está bien)
+        q_in_fwd = prop_q(q, M_in)
+        if modo == 'propaga':
+            Mk_fwd, q_fwd = kerr_fwd_func(q_in_fwd)
+            q_in_bwd = prop_q(q_fwd, M_mid)
+            Mk_bwd, q_bwd = kerr_bwd_func(q_in_bwd)
+            q_target = prop_q(q_bwd, M_close) # Este es el q que "quiere" la cavidad
+        else:
+            Mk_fwd, _, M_list = kerr_fetas_con_lista(q_in_fwd)
+            Mk_bwd, _ = kerr_fetas_bwd(None, M_list=M_list)
+            M_total = M_close @ Mk_bwd @ M_mid @ Mk_fwd @ M_in
+            q_target = q_from_M(M_total)
+
+        if not q_valido(q_target): break
+
+        # APLICAMOS RELAJACIÓN
+        q_new = q + alfa * (q_target - q)
+        
+        if guardar_historial:
+            w = w_from_q(q_new)
+            historial.append(w * 10 if np.isfinite(w) else np.nan)
+
+        if abs(q_new - q) < 1e-9: # Tolerancia fina
+            q_ultimo = q_new
+            break
+            
+        q = q_new
+        q_ultimo = q
+
+    return q_ultimo, historial
+
+#%% Modelos lente Kerr
+
+def kerr_lente_fina(q_in): #Calculo para una lente fina
+    if not q_valido(q_in): return None, None #Si no vale q no hagás nada
+    w = w_from_q(q_in) #Calculo w
+    if np.isnan(w) or w <= 0: return None, None
+    f_NL  = (np.pi**2 * w**4) / (K * lam**2 * Lc) #Definición del foco no-lineal con K
+    M     = np.array([[1.0, 0.0], [-1.0/f_NL, 1.0]]) #Matriz no-lineal
+    return M, prop_q(q_in, M)
+
+def kerr_fetas_fwd(q_in): #  q --> () ---> q'
+    if not q_valido(q_in): return None, None
+    l = Lc / slices #Tamaño de cada slice
+    #Calculo como es inicialmente
+    M_acum = np.eye(2); q = q_in 
+    M_half = free(l/2)
+    q = prop_q(q, M_half); M_acum = M_half @ M_acum
+    
+    for i in range(slices):
+        w = w_from_q(q)
+        if np.isnan(w) or w <= 0: return None, None
+        f_NL = (np.pi**2 * w**4) / (K * lam**2 * l)
+        Ml   = np.array([[1.0, 0.0], [-1.0/f_NL, 1.0]])
+        
+        q = prop_q(q, Ml)
+        M_acum = Ml @ M_acum #q va a ser propagar por la lente
+        
+        #Ahora propago libremente por el tamaño del slice
+        if i < slices - 1:
+            q = prop_q(q, free(l))
+            M_acum = free(l) @ M_acum #Voy reemplazando la matriz para hallar la matriz entera
+    
+    q = prop_q(q, M_half)
+    M_acum = M_half @ M_acum #Cuando termina tomo medio tamaño de distancia y listo!
+    
+    return M_acum, q
+
+def kerr_fetas_bwd(q_in, M_list = None): #   q' <--- () <--- q 
+    if M_list is not None:
+        # Usar las lentes del fwd en orden inverso
+        return producto_stack(list(reversed(M_list))), None
+
+   
+    if not q_valido(q_in): return None, None
+    l = Lc / slices
+    M_acum = np.eye(2)
+    q = q_in
+    M_half = free(l/2) #Igual que antes
+    
+    q = prop_q(q, M_half); M_acum = M_half @ M_acum
+    
+    for i in range(slices - 1, -1, -1): #Va haciendo pasos para atras
+        w = w_from_q(q)
+        if np.isnan(w) or w <= 0: return None, None
+        
+        f_NL = (np.pi**2 * w**4) / (K * lam**2 * l)
+        Ml   = np.array([[1.0, 0.0], [-1.0/f_NL, 1.0]])
+        q = prop_q(q, Ml)
+        M_acum = Ml @ M_acum
+        
+        if i > 0:
+            q = prop_q(q, free(l))
+            M_acum = free(l) @ M_acum
+            
+    q = prop_q(q, M_half)
+    M_acum = M_half @ M_acum
+    return M_acum, q
+
+def kerr_fetas_con_lista(q_in):
+    """
+    Igual que kerr_fetas_fwd pero devuelve ademas M_list
+    para poder invertir el orden en bwd.
+    """
+    if not q_valido(q_in): return None, None, None
+    l = Lc / slices
+    M_acum = np.eye(2); q = q_in
+    M_list = []
+    M_half = free(l/2)
+    q = prop_q(q, M_half); M_list.append(M_half)
+    for i in range(slices):
+        w = w_from_q(q)
+        if np.isnan(w) or w <= 0: return None, None, None
+        f_NL = (np.pi**2 * w**4) / (K * lam**2 * l)
+        Ml   = np.array([[1.0, 0.0], [-1.0/f_NL, 1.0]])
+        M_list.append(Ml)
+        q = prop_q(q, Ml)
+        if i < slices - 1:
+            M_list.append(free(l))
+            q = prop_q(q, free(l))
+    q = prop_q(q, M_half); M_list.append(M_half)
+    M_acum = producto_stack(M_list)
+    return M_acum, q, M_list
+
+def barrer(Z, delta_vals, kerr_fwd, kerr_bwd, modo, usar_ml_prev, nombre=''):
+    resolucion = len(delta_vals)
+    w_cw_vals  = np.full(resolucion, np.nan)
+    w_ml_vals  = np.full(resolucion, np.nan)
+    q_ml_prev  = None
+    q_last_cw  = None
+
+    # Indices donde graficamos convergencia: inicio, mitad, final
+    idx_conv = [resolucion // 2]
+
+    for i, delta in enumerate(delta_vals):
+
+        M_cw = matriz_cw(delta)
+        q_cw = q_from_M(M_cw)
+        w_cw = w_from_q(q_cw)
+        w_cw_vals[i] = w_cw * 10 if not np.isnan(w_cw) else np.nan #Calculo CW
+        if q_valido(q_cw):
+            q_last_cw = q_cw
+
+        M_in, M_mid, M_close = matrices_ml(Z, delta)
+
+        if usar_ml_prev and q_ml_prev is not None:
+            q_guess = q_ml_prev 
+        elif q_valido(q_cw):
+            q_guess = q_cw
+        else:
+            q_guess = q_last_cw
+#        elif q_last_cw is not None:
+ #           q_guess = q_last_cw
+  #      else:
+   #         q_guess = _guess_safe()
+
+        if not q_valido(q_guess):
+            q_ml_prev = None
+            continue
+
+        # Guardar historial solo en los indices de interes
+        guardar = i in idx_conv
+
+        q_res, historial = _iterar(
+            q_guess, M_in, M_mid, M_close,  #Aca te doy como guess el anterior o según haya salido
+            kerr_fwd, kerr_bwd, modo,
+            guardar_historial=guardar
+        )
+
+        # Grafico de convergencia para este delta
+        if guardar and historial and len(historial) > 1:
+            etiqueta = { resolucion//2: 'mitad', }[i]
+            fig_c, ax_c = plt.subplots(figsize=(6, 3))
+            ax_c.plot(historial, 'o-', ms=3, color='tomato')
+            ax_c.axhline(historial[-1], ls='--', color='gray', lw=1)
+            ax_c.set_xlabel('Iteracion')
+            ax_c.set_ylabel(r'$w_0$ [mm]')
+            ax_c.set_title(f'{nombre} — convergencia en delta={delta:.4f} ({etiqueta})\nZ={Z}')
+            ax_c.grid(True, linestyle=':')
+            plt.tight_layout()
+            plt.show()
+
+        if q_valido(q_res):
+            w_ml_vals[i] = w_from_q(q_res) * 10
+            q_ml_prev = q_res
+        else:
+            q_ml_prev = None
+
+    return w_cw_vals, w_ml_vals
+#%% Calculo de todo
+
+resolucion   = 1250
+delta_vals_a = np.linspace(delta1 - 0.1*delta1, delta1 + 0.05*delta1, resolucion)
+delta_vals_b = np.linspace(delta1 - 0.1*delta1, delta1 + 0.05*delta1, resolucion)
+
+configs = [
+    #('Lente fina, guess CW',             kerr_lente_fina, kerr_lente_fina, 'propaga',    False),
+    #('Fetas, propaga q, guess CW',        kerr_fetas_fwd,  kerr_fetas_bwd,  'propaga',    False),
+    #('Fetas, propaga q, guess ML prev',   kerr_fetas_fwd,  kerr_fetas_bwd,  'propaga',    True ),
+    ('Fetas, autovector, guess CW',       kerr_fetas_fwd,  kerr_fetas_bwd,  'autovector', False),
+    ('Fetas, autovector, guess ML prev',  kerr_fetas_fwd,  kerr_fetas_bwd,  'autovector', True ),
+]
+
+resultados = []
+for nombre, kfwd, kbwd, modo, ml_prev in configs:
+    print(f"Calculando: {nombre}...")
+    wa_cw, wa_ml = barrer(Z_a, delta_vals_a, kfwd, kbwd, modo, ml_prev, nombre=f'{nombre} [Hard]')
+    wb_cw, wb_ml = barrer(Z_b, delta_vals_b, kfwd, kbwd, modo, ml_prev, nombre=f'{nombre} [Soft]')
+    resultados.append((nombre, wa_cw, wa_ml, wb_cw, wb_ml))
+
+#%%Graficar
+
+for nombre, wa_cw, wa_ml, wb_cw, wb_ml in resultados:
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].plot(delta_vals_a, wa_cw, color='steelblue', lw=2, label='CW')
+    axes[0].plot(delta_vals_a, wa_ml, color='tomato',    lw=2, label='ML', alpha=0.8)
+    axes[0].axvline(delta1, ls='--', color='gray', label=r'$\delta_1$')
+    axes[0].set_title(f'Hard aperture (Z={Z_a})')
+    axes[0].set_xlabel(r'$\delta$ [cm]')
+    axes[0].set_ylabel(r'$w_0$ [mm]')
+    axes[0].legend()
+    axes[0].grid(True, linestyle=':')
+
+    axes[1].plot(delta_vals_b, wb_cw, color='steelblue', lw=2, label='CW')
+    axes[1].plot(delta_vals_b, wb_ml, color='tomato',    lw=2, label='ML', alpha=0.8)
+    axes[1].axvline(delta1, ls='--', color='gray', label=r'$\delta_1$')
+    axes[1].set_title(f'Soft aperture (Z={Z_b})')
+    axes[1].set_xlabel(r'$\delta$ [cm]')
+    axes[1].set_ylabel(r'$w_0$ [mm]')
+    axes[1].legend()
+    axes[1].grid(True, linestyle=':')
+
+    fig.suptitle(f'{nombre}  —  K={K}, Lc={Lc} cm, slices={slices}, tol={TOL}')
+    plt.tight_layout()
+    plt.show()
+#%%Cintura en la cavidad
+
+
+def calcular_q_ml_para_config(delta, Z, kerr_fwd, kerr_bwd, modo, usar_ml_prev=False):
+    """
+    Calcula q_CW y q_ML para un delta y una configuracion dada.
+    Devuelve: q_cw, q_ml
+    """
+    M_in, M_mid, M_close = matrices_ml(Z, delta)
+    q_cw = q_from_M(matriz_cw(delta))
+
+    # Usamos q_CW como semilla inicial
+    q_ml, _ = _iterar(
+        q_cw, M_in, M_mid, M_close,
+        kerr_fwd, kerr_bwd, modo,
+        guardar_historial=False
+    )
+
+    return q_cw, q_ml
+
+
+def graficar_perfil_cavidad_metodos(delta, Z, configs, titulo_general=''):
+    """
+    Grafica el perfil de cintura a lo largo de la cavidad para cada metodo
+    de la lista configs, manteniendo el mismo delta y Z.
+    """
+    E1 = mirror(f1)
+    E2 = mirror(f2)
+
+    # Elementos fijos de la cavidad
+    D_T1 = f1 - d/2 + Z
+    D_T2 = f2 + delta - d/2 - Z
+
+    elementos = [
+        ('EM1',     np.eye(2),     0),
+        ('L1',      free(L1),      L1),
+        ('E1',      E1,            0),
+        ('D_T1',    free(D_T1),    D_T1),
+        ('cristal', free(d),       d),
+        ('D_T2',    free(D_T2),    D_T2),
+        ('E2',      E2,            0),
+        ('L2',      free(L2),      L2),
+        ('EM2',     np.eye(2),     0),
+        ('L2',      free(L2),      L2),
+        ('E2',      E2,            0),
+        ('D_T2',    free(D_T2),    D_T2),
+        ('cristal', free(d),       d),
+        ('D_T1',    free(D_T1),    D_T1),
+        ('E1',      E1,            0),
+        ('L1',      free(L1),      L1),
+        ('EM1',     np.eye(2),     0),
+    ]
+
+    n = len(configs)
+    fig, axes = plt.subplots(n, 1, figsize=(13, 3.2 * n), sharex=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, (nombre, kfwd, kbwd, modo, ml_prev) in zip(axes, configs):
+        q_cw, q_ml = calcular_q_ml_para_config(delta, Z, kfwd, kbwd, modo, ml_prev)
+
+        z_vals = []
+        w_cw_z = []
+        w_ml_z = []
+        z_actual = 0.0
+
+        q_c = q_cw
+        q_m = q_ml
+
+        for _, M, longitud in elementos:
+            z_vals.append(z_actual)
+
+            wc = w_from_q(q_c)
+            wm = w_from_q(q_m)
+
+            w_cw_z.append(wc * 10 if np.isfinite(wc) else np.nan)  # mm
+            w_ml_z.append(wm * 10 if np.isfinite(wm) else np.nan)  # mm
+
+            q_c = prop_q(q_c, M)
+            if q_m is not None and q_valido(q_m):
+                q_m = prop_q(q_m, M)
+            else:
+                q_m = np.nan
+
+            z_actual += longitud
+
+        z_vals = np.array(z_vals)
+        w_cw_z = np.array(w_cw_z, dtype=float)
+        w_ml_z = np.array(w_ml_z, dtype=float)
+
+        ax.plot(z_vals, w_cw_z, color='steelblue', lw=2, label='CW')
+        ax.plot(z_vals, w_ml_z, color='tomato', lw=2, label='ML', alpha=0.85)
+
+        ax.fill_between(
+            z_vals, w_cw_z, w_ml_z,
+            where=(w_ml_z >= w_cw_z),
+            alpha=0.2, color='tomato'
+        )
+        ax.fill_between(
+            z_vals, w_cw_z, w_ml_z,
+            where=(w_ml_z < w_cw_z),
+            alpha=0.2, color='steelblue'
+        )
+
+        # Marcar cristal ida y vuelta
+        z_cristal_ida = L1 + D_T1
+        z_cristal_vuelta = L1 + D_T1 + d + D_T2 + L2 + L2 + D_T2
+        ax.axvspan(z_cristal_ida, z_cristal_ida + d, alpha=0.15, color='green')
+        ax.axvspan(z_cristal_vuelta, z_cristal_vuelta + d, alpha=0.15, color='green')
+
+        ax.set_ylabel(r'$w$ [mm]')
+        ax.set_title(nombre)
+        ax.grid(True, linestyle=':')
+        ax.legend(loc='best')
+
+    axes[-1].set_xlabel('Posición en la cavidad [cm]')
+    fig.suptitle(
+        f'{titulo_general}\n'
+        f'delta = {delta:.5f} cm   |   Z = {Z:.3f} cm   |   K = {K}',
+        y=0.995
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+# Elegí un delta donde ML converja bien
+delta_trabajo = delta1 - 0.05 * delta1
+
+# Si querés, podés usar las mismas configs que ya definiste
+# configs = [
+#     ('Lente fina, guess CW',             kerr_lente_fina, kerr_lente_fina, 'propaga',    False),
+#     ('Fetas, propaga q, guess CW',        kerr_fetas_fwd,  kerr_fetas_bwd,  'propaga',    False),
+#     ('Fetas, propaga q, guess ML prev',   kerr_fetas_fwd,  kerr_fetas_bwd,  'propaga',    True ),
+#     ('Fetas, autovector, guess CW',       kerr_fetas_fwd,  kerr_fetas_bwd,  'autovector', False),
+#     ('Fetas, autovector, guess ML prev',  kerr_fetas_fwd,  kerr_fetas_bwd,  'autovector', True ),
+# ]
+
+graficar_perfil_cavidad_metodos(
+    delta_trabajo,
+    Z_a,
+    configs,
+    titulo_general='Perfil de cavidad — Hard aperture'
+)
+
+graficar_perfil_cavidad_metodos(
+    delta_trabajo,
+    Z_b,
+    configs,
+    titulo_general='Perfil de cavidad — Soft aperture'
+)
+
+#%% Cintura Vs Iteraciones
+
+def graficar_cintura_vs_iteraciones(delta, Z, configs, titulo_general=''):
+    """
+    Grafica w0 en función de las iteraciones para un delta fijo y un Z dado.
+    Hace un pequeño desplazamiento horizontal para que curvas superpuestas
+    no queden totalmente tapadas.
+    """
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    for j, (nombre, kfwd, kbwd, modo, ml_prev) in enumerate(configs):
+        M_in, M_mid, M_close = matrices_ml(Z, delta)
+        q_cw = q_from_M(matriz_cw(delta))
+
+        if not q_valido(q_cw):
+            print(f"{nombre}: q_CW inválido")
+            continue
+
+        q_res, historial = _iterar(
+            q_cw, M_in, M_mid, M_close,
+            kfwd, kbwd, modo,
+            guardar_historial=True
+        )
+
+        if historial is None or len(historial) == 0:
+            print(f"{nombre}: sin historial")
+            continue
+
+        x = np.arange(len(historial), dtype=float)
+        x = x + 0.03 * j   # offset visual mínimo para evitar superposición total
+
+        print(f"{nombre}: {len(historial)} puntos")
+
+        ax.plot(
+            x, historial,
+            marker='o', ms=4, lw=1.6,
+            label=nombre,
+            zorder=10 - j
+        )
+
+    ax.set_xlabel('Iteración')
+    ax.set_ylabel(r'$w_0$ [mm]')
+    ax.set_title(
+        f'{titulo_general}\n'
+        f'delta = {delta:.3f} cm   |   Z = {Z:.3f} cm'
+    )
+    ax.grid(True, linestyle=':')
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    plt.show()
+    
+delta_trabajo = 1.5
+
+graficar_cintura_vs_iteraciones(
+    delta_trabajo,
+    Z_b,
+    configs,
+    titulo_general='Cintura vs iteraciones — Soft aperture'
+)
+
