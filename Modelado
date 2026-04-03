@@ -1,0 +1,92 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+#%% Parametros
+
+
+f1  = 7.5
+f2  = 7.5
+L1  = 30.0
+L2  = 40.0
+lam = 1027e-7
+Lc  = 0.5
+d   = Lc
+K   = 0.1
+
+Z_a = 0.0
+Z_b = 0.35
+
+slices = 200
+
+delta1 = f2**2 / (L2 - f2)
+
+TOL = 1e-8
+
+#%% Matrices de propagacion
+
+def free(x):
+    return np.array([[1.0, x], [0.0, 1.0]]) #Propagación libre
+
+def mirror(f):
+    return np.array([[1.0, 0.0], [-1.0/f, 1.0]]) #Espejo de foco f
+
+def prop_q(q, M):
+    A, B, C, D = M[0,0], M[0,1], M[1,0], M[1,1] #Propagación de q con matrices 
+    return (A*q + B) / (C*q + D)
+
+def w_from_q(q):
+    try:
+        im = np.imag(1.0/q)
+        if im >= 0:
+            return np.nan #Si la parte imaginaria se hace negativo se cancela la cintura
+        return np.sqrt(-lam / (np.pi * im))
+    except:
+        return np.nan
+
+def q_valido(q): #Solo le pido que no diverjan estas cosas
+    try:
+        return np.isfinite(q.real) and np.isfinite(q.imag) and np.imag(1.0/q) < 0
+    except:
+        return False
+
+def q_from_M(Mat): #A partir de M calculo q como dice el apunte de Larrotonda
+    A, B, D = Mat[0,0], Mat[0,1], Mat[1,1]
+    disc = (A + D)**2 / 4
+    if disc >= 1:
+        return np.nan
+    return B / ((D - A)/2 - 1j*np.sqrt(1 - disc))
+
+def _guess_safe():
+    """
+    Devuelve q_CW en el ultimo punto estable antes de delta1.
+    Solo se usa cuando delta > delta1 y no hay q_ml_prev.
+    """
+    E1  = mirror(f1)
+    E2  = mirror(f2)
+    eps = delta1 * 0.01   # 1% antes de delta1
+    ds  = free(f1 + f2 + delta1 - eps)
+    Ms  = free(L1) @ E1 @ ds @ E2 @ free(L2) @ free(L2) @ E2 @ ds @ E1 @ free(L1)
+    return q_from_M(Ms)
+
+def matriz_cw(delta): #Me calcula CW a partir del delta
+    E1 = mirror(f1); E2 = mirror(f2)
+    dist = free(f1 + f2 + delta)
+    return free(L1) @ E1 @ dist @ E2 @ free(L2) @ free(L2) @ E2 @ dist @ E1 @ free(L1)
+
+def matrices_ml(Z, delta): #Calculo todas las matrices del ML salvo las de dentro del cristal
+    E1 = mirror(f1); E2 = mirror(f2)
+    D_T1 = f1 - d/2 + Z
+    D_T2 = f2 + delta - d/2 - Z 
+    #Lo que hago es alargar el brazo de la lente 2 manteniendo rígido la distancia del curvo y el plano
+    M_in    = free(D_T1) @ E1 @ free(L1)
+    M_mid   = free(D_T2) @ E2 @ free(L2) @ free(L2) @ E2 @ free(D_T2)
+    M_close = free(L1) @ E1 @ free(D_T1)
+    return M_in, M_mid, M_close 
+
+def producto_stack(M_list):
+    """Producto matricial en el orden fisico de propagacion."""
+    M = np.eye(2)
+    for Mi in M_list:
+        M = Mi @ M
+    return M
+
